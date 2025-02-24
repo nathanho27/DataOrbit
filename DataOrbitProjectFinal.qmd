@@ -1,0 +1,554 @@
+---
+title: "DataOrbit 2025 Project"
+author: "Team PACAN"
+format:
+  html:
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    embed-resources: true
+    theme: simplex
+    code-fold: show
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+```{r, include = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(yardstick)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(naniar)
+library(janitor)
+library(MASS)
+library(corrr)
+library(rpart.plot)
+library(vip)
+library(vembedr) # for shiny
+library(randomForest)
+library(stringr)
+library(discrim)
+library(knitr)
+library(glmnet)
+library(modeldata)
+library(kernlab)
+library(tidyclust)
+library(corrplot)
+tidymodels_prefer()
+```
+
+## Loading in and Exploring Data
+
+Here we Load in and Explore our Data
+
+```{r}
+SuicideRates <- read_csv("./archive/suicide_rates_1990-2022.csv", show_col_types = FALSE) %>% clean_names()
+
+SuicideRates %>% colnames()
+```
+
+Here we Load in and Explore our Data
+
+```{r}
+sum(is.na(SuicideRates))
+```
+
+Check the original N/A observations
+
+```{r}
+# Remove these columns
+SuicideRates <- SuicideRates %>%
+select(-region_code, -country_code, -gdp, -gross_national_income)
+
+# These variables were redundant because we kept per capital variables.
+```
+
+Remove the columns that we deem as redundant, cut out gdp and gross_national_income in favor of the per capita versions.
+
+```{r}
+# keep death counts less than 0, cause_specific_death_percentage > 0
+SuicideRates <- SuicideRates %>% 
+  filter(suicide_count > 0, cause_specific_death_percentage > 0, death_rate_per100k > 0, population > 0, gni_per_capita > 0, inflation_rate > 0, employment_population_ratio > 0)
+
+## Hone in on the number of suicides, so we omitted suicide counts that were less than 0. 
+```
+
+To get rid of the N/A values we remove values of each of these variables that are less than 0, since we really want to hone in on the number of suicides we omit the suicide counts that are less than 0. This way we ensure that all numerical variables are positive.
+
+```{r}
+# renaming variables
+SuicideRates <- SuicideRates %>% rename(
+  region = region_name,
+  country = country_name,
+  year = year,
+  sex = sex,
+  age = age_group,
+  gen = generation,
+  suicides = suicide_count,
+  cause_death_pct = cause_specific_death_percentage,
+  death_rate = death_rate_per100k,
+  pop = population,
+  gdp_pc = gdp_per_capita,
+  gni_pc = gni_per_capita,
+  inflation = inflation_rate,
+  emp_ratio = employment_population_ratio
+)
+
+```
+
+Here we rename the variables that are too long to make it easier to display in EDA, and for convenience.
+
+```{r}
+SuicideRates <- SuicideRates %>%
+  group_by(region, country, year, sex, age, gen, pop, gdp_pc, gni_pc, inflation, emp_ratio) %>%
+  summarize(
+    suicides = sum(suicides, na.rm = TRUE),
+    cause_death_pct = mean(cause_death_pct, na.rm = TRUE),
+    death_rate = mean(death_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Group data by region, country, year, sex, age, generation, and economic factors. Then we summarize the suicide counts (total) and the other variables we take the mean or (average). .groups = "drop" prevents unnecessary grouping.
+
+```{r}
+vis_miss(SuicideRates)
+```
+
+Uses the naniar package to create a visual representation of missing values.
+
+```{r}
+## 23326 Obs 14 Col
+dim(SuicideRates)
+```
+
+Looks at the dimension of our dataset, we see that we have 23,326 observations and 14 columns.
+
+## Data Splitting for Model Evaluation
+
+```{r}
+SuicideRates <- SuicideRates %>% 
+  mutate(across(where(is.character), as.factor))
+
+set.seed(123)
+data_split <- initial_split(SuicideRates, strata = "suicides", prop = 0.75)
+rates_train <- training(data_split)
+rates_test <- testing(data_split)
+rates_fold <- vfold_cv(rates_train, v = 5)
+```
+
+Data splitting for modeling, this converts categorical variables to factors and splits the data into training (75%) and testing (25%). 5-fold cross-validation is used for model evaluation.
+
+## Exploratory Data Analysis (EDA)
+
+```{r}
+library(corrplot)
+library(dplyr)
+
+# Ensure the dataset has numeric columns selected correctly
+numeric_data <- SuicideRates %>% select(where(is.numeric))
+
+# Compute correlation matrix
+cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+
+# Plot correlation
+corrplot(cor_matrix, method = "number", type = "lower", diag = FALSE)
+```
+
+This selects only numeric variables from the dataset and calculates the correlation matrix and visualizes this correlation. We see a moderate to low correlation between most of our variables and a high correlation between gdp_pc and gni_pc which makes sense because they are both economic data.
+
+```{r, fig.cap = "From this graphic, we see that the top two generations with the highest suicide count out of all of the generations are Generation X and Baby Boomers. This means that our parents and grandparents are a part of this statistic, unfortunately. On the contrary, the generation with the lowest suicide rate are the Silent Generation and Gen Alpha. This makes sense because they're still a relatively young."}
+# Aggregate deaths by generation category
+total_deaths <- SuicideRates %>%
+  group_by(gen) %>%
+  summarize(sum_sui = sum(suicides))
+
+# Reorder 'gen' by sum_sui in descending order
+total_deaths$gen <- reorder(total_deaths$gen, total_deaths$sum_sui, decreasing = TRUE)
+
+# Create a bar plot of total deaths per generation without legend and colors
+ggplot(total_deaths, aes(x = gen, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Gen X and Baby Boomers Are The Most Likely To Commit Suicide", x = "Generation", y = "Total Deaths") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+```
+
+```{r}
+# Aggregate deaths by generation category
+total_deaths <- SuicideRates %>%
+  group_by(age) %>%
+  summarize(sum_sui = sum(suicides))
+
+# Reorder 'gen' by sum_sui in descending order
+total_deaths$age <- reorder(total_deaths$age, total_deaths$sum_sui, decreasing = TRUE)
+
+# Create a bar plot of total deaths per generation without legend and colors
+ggplot(total_deaths, aes(x = age, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "gray") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Gen X and Baby Boomers Are The Most Likely To Commit Suicide", x = "Generation", y = "Total Deaths") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+```
+
+From this bar graph we see that Gen X or people that are aged 35-54 and Baby Boomers those aged 55-74 are the most likely to commit suicide.
+
+```{r}
+ggplot(SuicideRates, aes(x = inflation, y = suicides)) + geom_point() + labs() + labs(title = "Relationship Between Inflation and Number of Suicides", x = "Inflation Rate (percentage)", y = "Number of Suicides") + theme_minimal()
+
+# SuicideRates %>% filter(inflation == max(SuicideRates$inflation))
+
+# the outlier values are from Ukraine in 1993
+```
+
+This is a scatter plot of inflation vs. suicide counts. It identifies periods in which there is a high inflation rate. In the highest inflation rate we note that there is a point in Ukraine in 1993 that had hyper-inflation caused by something that was not war.
+
+```{r, fig.cap= "The proportion of male to female in this data set are 0.52 and 0.47. There are slightly more men in the data set. However, the tiny bit of imbalance is not enough to explain the massive disparity between male and female suicde counts. Men have a much higher suicide count than women over all generations. The actual percentage for men is 77%, while women is 0.2233983."}
+total_deaths <- SuicideRates %>%
+  group_by(sex) %>%
+  summarize(sum_sui = sum(suicides))
+
+# table(SuicideRates$sex)
+
+# print(paste0("percent female ", 28296/60056))
+# print(paste0("percent male ", 31760/60056))
+
+ggplot(total_deaths, aes(x = sex, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Men Commit More Suicide Than Women", x = "Sex", y = "Total Suicide Counts") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none")  # Remove the legend
+```
+
+```{r, fig.cap = "The top two countries with the highest suicde counts are Russian Federation or Russia and the United States."}
+# Aggregate deaths by country
+total_deaths <- SuicideRates %>%
+  group_by(country) %>%
+  summarize(sum_sui = sum(suicides))
+
+# Find top 10 countries by total suicides
+top_10_deaths <- total_deaths %>%
+  arrange(desc(sum_sui)) %>%  # Order by total suicides in descending order
+  head(10)  # Select top 10 rows
+
+# Reorder 'gen' by sum_sui in descending order
+top_10_deaths$country <- reorder(top_10_deaths$country, top_10_deaths$sum_sui, decreasing = TRUE)
+
+# Create a bar plot of total deaths per generation without legend and colors
+ggplot(top_10_deaths, aes(x = country, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Top 10 Countries with The Highest Suicide Counts", x = "Country", y = "Total Deaths") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none")  # Remove the legend
+```
+
+```{r}
+# Create a bar plot of total deaths per generation without legend and colors
+ggplot(top_10_deaths, aes(x = country, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Top 10 Countries with the highest suicide count", x = "Country", y = "Total Deaths") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none")  # Remove the legend
+```
+
+This bar graph shows that the United States and Russian Federation have the highest count of suicides from the period of 1990-2022. This could be attributed to the aftermath of the cold war to the fall of the Soviet Union, among other external factors.
+
+```{r, fig.cap = "The top two countries with the lowest suicide counts are Maldives and Iraq."}
+# Aggregate deaths by country
+total_deaths <- SuicideRates %>%
+  group_by(country) %>%
+  summarize(sum_sui = sum(suicides))
+
+# Find top 10 countries by total suicides
+top_10_deaths <- total_deaths %>%
+  arrange(desc(sum_sui)) %>%  # Order by total suicides in descending order
+  tail(10)  # Select top 10 rows
+
+# Reorder 'gen' by sum_sui in descending order
+top_10_deaths$country <- reorder(top_10_deaths$country, top_10_deaths$sum_sui, decreasing = FALSE)
+
+# Create a bar plot of total deaths per generation without legend and colors
+ggplot(top_10_deaths, aes(x = country, y = sum_sui)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Set fill to a neutral color
+  scale_y_continuous(labels = scales::comma) +  # Add commas to y-axis labels
+  labs(title = "Top 10 Countries with the Lowest Suicide Count", x = "Country", y = "Total Suicides") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none")  # Remove the legend
+
+```
+```{r}
+library(RColorBrewer)
+#bob = sample(c("0-14 years", "15-24 years", "25-34 years", "35-54 years", "55-74 years", "75+ years"), size = 1000, replace = TRUE, prob = c(0.1364572, 0.1742691, 0.1776130, 0.1803996, 0.1729401, 0.1583212))
+
+# geom_text(aes(label = suicide_percentages),
+            #position = position_stack(vjust = 0.5)) +
+#suicide_percentages = c("13.6%", "17.4%", "17.7", "18%", "17.2", "15.8")
+
+suicide_percentages <- c(0.1364572, 0.1742691, 0.1776130, 0.1803996, 0.1729401, 0.1583212)
+
+age_labels <- c("0-14 years", "15-24 years", "25-34 years", "35-54 years", "55-74 years", "75+ years")
+percents <- round(suicide_percentages/sum(suicide_percentages)*100)
+age_labels <- paste(age_labels, percents, sep = ": ")
+# add percents to labels
+age_labels <- paste(age_labels,"%") # ad % to labels
+
+pie(suicide_percentages,labels = age_labels, col=brewer.pal(length(age_labels), "Pastel1"),
+   main="Proportion of Suicides by Age Group")
+
+
+
+```
+
+
+## Variable Selection
+
+
+```{r}
+full <- glm(suicides ~ ., data = na.omit(rates_train),  family = poisson)
+# full %>% summary()
+```
+
+Fitting a Poisson regression model to predict suicides using all features that are available.
+
+```{r, eval = FALSE}
+## stepwise selection with AIC
+reduced_by_AIC <- stats::step(full)
+```
+
+```{r, eval = FALSE}
+summary(reduced_by_AIC)
+```
+
+```{r, eval = FALSE}
+anova(reduced_by_AIC, full, test = "Chisq")
+```
+
+Stepwise regression (AIC) to automatically remove unnecessary variables. stats::step() removes variables to minimize the AIC (Akaike Information Criterion). ANOVA compares the full model to the reduced model. This balances model fit and complexity. This leads to a better trade-off between explanatory power and over-fitting.
+
+```{r, eval = FALSE}
+glm(data = SuicideRates, suicides ~ ., family = "poisson") %>% summary()
+
+# SuicideRates %>% filter(country == "Slovenia") %>% select(death_rate)
+```
+
+Tests Poisson regression for suicides and Gaussian regression for death_rate. For context, Poisson is used for count data, while Gaussian is used for continuous data like rate-based predictions.
+
+```{r}
+library(glmnet)
+x <- model.matrix(suicides ~ ., data = na.omit(rates_train))[,-1] 
+# remove intercept column
+y <- na.omit(rates_train)$suicides
+
+# alpha 1 for ridge
+# alpha 0 for lasso
+# alpha 0.5 for elastic net.
+fit_lasso <- glmnet(x, y, alpha = 1, family = "poisson")
+```
+
+```{r}
+plot(fit_lasso, main = "Feature Shrinkage via Lasso Regression")
+```
+
+Numeric matrix x is created for all predictors. The intercept column is removed and the target variable of suicide counts is represented by y. Lasso (alpha = 1) applies L1 regularization which shrinks coefficients and removes predictors that are weak. Lasso helps in feature selection and it does this by setting coefficients to zero.
+
+```{r, eval = FALSE}
+## Cross-Validation to find the best Lambda for regularization
+set.seed(123)
+
+fit.glmnet.5foldCV_lasso <- cv.glmnet(x, y, alpha = 1, nfolds = 5) # reduce to 0
+
+fit.glmnet.5foldCV_lasso # tuned lambda = 0.06
+
+# coef(fit.glmnet.5foldCV_lasso, s= "lambda.min") 
+# our variables at the tuned lambda
+```
+
+5-fold cross-validation is done. This helps finds optimal penalty parameter (lambda), and extracts the best coefficients after regularization.
+
+```{r}
+# we were curious about elastic net 
+fit_net <- glmnet(x, y, alpha = 0.5, family = "poisson")
+plot(fit_net, main = "Feature Shrinkage via Elastic Net")
+```
+
+Elastic Net is a combination of both Lasso (L1) and Ridge (L2) regularization. This provides a balance between removing weak features (L1) and reducing multi-collinearity (L2).
+
+```{r}
+# Why not try ridge as well
+fit_ridge <- glmnet(x, y, alpha = 0, family = "poisson")
+plot(fit_ridge, main = "Feature Shrinkage via Ridge Net")
+```
+
+Ridge applies L2 regularization, but unlike Ridge does not remove variables completely but reduces the importance of these variables.
+
+## Final Model Selection
+
+```{r}
+glm(suicides ~ . - region - gen, data =SuicideRates) %>% summary()
+
+anova(lm(gdp_pc ~ country, data = SuicideRates))
+anova(lm(gni_pc ~ country, data = SuicideRates))
+anova(lm(gni_pc ~ gdp_pc, data = SuicideRates))
+
+library(tidyverse)
+SuicideRates %>% select(country, gdp_pc, gni_pc, year) 
+```
+
+Removes region and gen from the model - insignificant. Simplifies the final model. ANOVA checks whther the gdp_pc and gni_pc are correlated. The significant F-test shows that these two variables are redundant.
+
+```{r}
+pois_model <- glm(data = SuicideRates, suicides ~ . -region - country - gni_pc - gen, family = poisson(link = "log")) 
+# pois_model %>% summary()
+
+# Calculate dispersion statistic
+dispersion_ratio <- sum(residuals(pois_model, type = "pearson")^2) / pois_model$df.residual
+
+print(dispersion_ratio) ## Very dispersed data
+```
+
+```{r}
+# Predict suicides for test data
+predictions <- predict(pois_model, newdata = rates_test, type = "response")
+
+# View predictions
+library(Metrics)
+# library(yardsticsk)
+
+# Actual values from test set
+actual <- rates_test$suicides
+
+# Compute evaluation metrics
+mae_value <- Metrics::mae(actual, predictions)    # Mean Absolute Error
+rmse_value <- Metrics::rmse(actual, predictions)  # Root Mean Squared Error
+r2_value <- 1 - (sum((actual - predictions)^2) / sum((actual - mean(actual))^2))  # R-squared
+```
+
+Poisson Model excludes region, country, gni_pc, and gen, uses the log link function. The dispersion statistic if variance \> mean then the data is over-dispersed. Since our dispersion ratio is 216.7849, this means that the variance of our data is much higher than the mean. This makes sense given our high RMSE. Which is more sensitive to outlier values.
+
+```{r}
+library(ggplot2)
+
+# Create a scatter plot of actual vs. predicted values
+ggplot(data.frame(actual, predictions), aes(x = actual, y = predictions)) +
+  geom_point(alpha = 0.5, color = "blue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +  # Perfect fit line
+  labs(title = "Actual vs Predicted Suicides",
+       x = "Actual Suicides",
+       y = "Predicted Suicides") +
+  theme_minimal()
+
+```
+
+## Time Series Modeling: For time-sake I chose to focus solely on the United States
+
+```{r}
+library(dplyr)
+# Aggregate suicide data by year and country
+SuicideRatesTimeSeries <- SuicideRates %>%
+  group_by(year, country) %>%
+  summarise(
+    total_suicides = sum(suicides, na.rm = TRUE),  # Sum suicides per country per year
+    total_population = sum(pop, na.rm = TRUE),  # Total population per country per year
+    suicide_rate_per_100k = round((total_suicides / total_population) * 1000000, 1),  # Rate per 1M
+    .groups = "drop"
+  )
+
+# Convert data into time series for each country
+CountryTimeSeries <- split(SuicideRatesTimeSeries, SuicideRatesTimeSeries$country) %>%
+  lapply(function(df) ts(df$suicide_rate_per_100k, start = 1990, frequency = 1))
+```
+
+Groups data by year and country, to get the total suicides and population per country per year. This calculates suicide_rate_per_100k (suicide rates per 100,000 people). This is done because this is how the data of suicides are normally shown, for example United States 2022, 14.2 suicides per 100,000. Then we convert the time series data into the time series format (ts()), creating a list of time series objects for each country.
+
+## Running Time Series for USA
+
+```{r}
+library(astsa)
+```
+
+```{r}
+# Country Time Series, using USA
+USATimeSeries <- CountryTimeSeries[["United States of America"]]
+```
+
+Isolate the USA time series from the list of country-specific time series.
+
+```{r}
+ts.plot(CountryTimeSeries[["United States of America"]], 
+        main = "USA Suicide Rate per 100K (1990-2022)", 
+        ylab = "Suicide Rate per 100K", 
+        xlab = "Year")
+```
+
+Looking at the Time Series, we can break the data down into subsections. From 1990-2000, the suicide rate had steadily declined, this can be explained by the economic growth that was seen in the United States. More specifically the dot-com boom which was fueled by the development of internet-based companies, the rise of the tech-based start ups, and the massive stock market growth. Around 2000-2007, the suicide rate had remained low this could be explained by the continued economic prosperity that was seen until 2007. From 2008 - 2018, there was another huge spike in the data leading to an increase in the suicide rates, this could be attributed to the 2008 financial crisis, where unemployment had surged, and many Americans faced a lot of financial stress, the Opioid epidemic and the rise of social media and cyber-bullying may also be factors. Slight dip from 2018-2020, recovery from poor economy. 2020 onward, COVID-19 epidemic, more financial stress, with the post pandemic society.
+
+## Forecasting USA future Suicide Rates (ARIMA)
+
+```{r}
+library(tseries)
+
+# Check stationarity for the USA suicide rate
+adf.test(CountryTimeSeries[["United States of America"]])
+```
+
+Check stationarity, since not stationary I choose to difference to remove trends and make the data stationary.
+
+```{r}
+library(forecast)
+UnitedStatesSeries <- diff(CountryTimeSeries[["United States of America"]])
+# Plot Autocorrelation (ACF) and Partial Autocorrelation (PACF)
+acf(CountryTimeSeries[["United States of America"]])
+```
+
+```{r}
+# PACF
+pacf(CountryTimeSeries[["United States of America"]])
+```
+
+ACF plot helps determine the MA terms while PACF helps determine the AR terms, combined together they guide in the ARIMA model selection. Here we see that the difference is 1, AR(1) uses one past value for prediction and MA(1) uses one lagged moving average term looking at the ACF and PACF.
+
+```{r}
+library(forecast)
+
+# Fit ARIMA(1,1,1) model
+arima_model <- Arima(CountryTimeSeries[["United States of America"]], order = c(1,1,1))
+summary(arima_model)
+```
+
+The ARIMA model helps to forecast future suicide rates.
+
+```{r}
+#Forecast of the next 10 years of Suicide Rates in the United States
+forecast_arima <- forecast(arima_model, h = 10)  # Forecast next 10 years
+autoplot(forecast_arima) +
+  labs(title = "ARIMA(1,1,1) Forecast: USA Suicide Rate per 100K",
+       x = "Year", y = "Suicide Rate per 100K") +
+  theme_minimal()
+```
+
+To explore future trends, I visualized a forecast using the ARIMA model. The goal was not just statistical modeling but to create a clear visual representation of where suicide rates may be heading based on past data. This forecast includes a confidence interval, helping to communicate uncertainty visually. The widening blue region in the plot shows the range of possible outcomes, making it an effective way to convey both trends and uncertainty at a glance.
+
+The ARIMA(1,1,1) forecast suggests a moderate upward trend in suicide rates, with increasing uncertainty over time. The confidence intervals widen, indicating potential external influences like economic conditions or policy changes. While the model predicts some stability, further analysis with economic factors or alternative factors could improve accuracy. Comparing trends with other countries may also provide valuable context. But Given the low amount of time, this cannot be done.

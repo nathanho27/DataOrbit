@@ -1,0 +1,18 @@
+﻿Codebook
+RegionCode: Unique identifier for the region such as South Asia, Europe)
+RegionName: Full name of the region
+CountryCode: Unique identifier for the country
+CountryName: Full name of the country
+Year: The year in which the data was collected
+Sex: Gender
+SuicideCount: Number of suicides recorded
+CauseSpecificDeathPercentage: The proportion of cause-specific deaths relative to the total cause of deaths (all including suicides)
+StdDeathRate: Age-standardized death rate from suicide per 100,000 people
+DeathRatePer100K: Crude death rate from suicide per 100,000 people
+Population: Total population of the country in a particular year
+GDP: The total economic output (GDP) converted to US dollars
+GDPPerCapita: A country's economic output per person (GDP per capita), measured in US dollars.
+GNI: Similar to GDP but also includes income citizens receive from abroad. The Atlas method is used to adjust for currency.
+GNIPerCapita: GNI per person (GNI per capita) adjusted for purchasing power parity (PPP).
+InflationRate: The annual increase in consumer prices, essentially how much more expensive things are getting year-over-year.
+EmploymentPopulationRatio: Percentage of the population aged 15+ that is employed.
